@@ -411,6 +411,15 @@ async function buildContainerArgs(
   // Everything NanoClaw-specific is in container.json (read by runner at startup).
   args.push('-e', `TZ=${TIMEZONE}`);
 
+  // Custom: forward the Claude auto-compact window override into the container
+  // when set on the host. claude.ts reads CLAUDE_CODE_AUTO_COMPACT_WINDOW from
+  // its own process.env, but the claude provider has no host-side passthrough,
+  // so without this line the host .env value never reaches the container.
+  // Used to raise the compaction threshold for the 1M-context DeepSeek model.
+  if (process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW) {
+    args.push('-e', `CLAUDE_CODE_AUTO_COMPACT_WINDOW=${process.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW}`);
+  }
+
   // Provider-contributed env vars (e.g. XDG_DATA_HOME, OPENCODE_*, NO_PROXY).
   if (providerContribution.env) {
     for (const [key, value] of Object.entries(providerContribution.env)) {
