@@ -208,7 +208,12 @@ registerChannelAdapter('telegram', {
       adapter: telegramAdapter,
       concurrency: 'concurrent',
       extractReplyContext,
-      supportsThreads: false,
+      // Forum supergroups expose per-topic threads (message_thread_id). Keep
+      // them so topic messages route to per-topic sessions and replies land
+      // back in the originating topic instead of General. DMs (is_group=0) and
+      // non-forum groups carry no topic id, so they still collapse to one
+      // session. (Upstream default is false; this is Carbon's forum-topic fix.)
+      supportsThreads: true,
       transformOutboundText: sanitizeTelegramLegacyMarkdown,
       maxTextLength: 4000,
     });
