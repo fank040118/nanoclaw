@@ -31,6 +31,7 @@ import type { InboundEvent } from '../../channels/adapter.js';
 import { registerResponseHandler, type ResponsePayload } from '../../response-registry.js';
 import { getDeliveryAdapter } from '../../delivery.js';
 import { log } from '../../log.js';
+import { readEnvFile } from '../../env.js';
 import type { MessagingGroup, MessagingGroupAgent } from '../../types.js';
 import { canAccessAgentGroup } from './access.js';
 import {
@@ -49,7 +50,7 @@ import {
   updatePendingChannelApprovalCard,
 } from './db/pending-channel-approvals.js';
 import { deletePendingSenderApproval, getPendingSenderApproval } from './db/pending-sender-approvals.js';
-import { hasAdminPrivilege } from './db/user-roles.js';
+import { hasAdminPrivilege, isOwner } from './db/user-roles.js';
 import { getUser, upsertUser } from './db/users.js';
 import { requestSenderApproval } from './sender-approval.js';
 import { ensureUserDm } from './user-dm.js';
@@ -289,7 +290,69 @@ registerResponseHandler(handleSenderApprovalResponse);
 
 // ── Unknown-channel registration flow ──
 
+// Install-specific hook (Carbon's setup):
+//   1. Any new channel under the configured private Discord guild is auto-wired
+//      to the configured agent group with always-on (pattern) engagement — no
+//      approval card. Lets new project channels "just work" once @mentioned.
+//   2. Otherwise, only the OWNER's own new chats raise a registration card.
+//      Unknown channels from non-owners (strangers DMing the searchable bot, or
+//      the bot being added to a foreign group) are dropped silently so they
+//      can't spam the owner with approval cards.
+const autowireEnv = readEnvFile(['AUTOWIRE_DISCORD_GUILD', 'AUTOWIRE_AGENT_GROUP']);
+const AUTOWIRE_GUILD = autowireEnv.AUTOWIRE_DISCORD_GUILD || null;
+const AUTOWIRE_AGENT = autowireEnv.AUTOWIRE_AGENT_GROUP || null;
+
 setChannelRequestGate(async (mg, event) => {
+  // 1. Auto-wire new channels in the configured private Discord guild.
+  if (
+    AUTOWIRE_GUILD &&
+    AUTOWIRE_AGENT &&
+    mg.channel_type === 'discord' &&
+    mg.platform_id.startsWith(`discord:${AUTOWIRE_GUILD}:`) &&
+    getAgentGroup(AUTOWIRE_AGENT)
+  ) {
+    const mgaId = `mga-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    createMessagingGroupAgent({
+      id: mgaId,
+      messaging_group_id: mg.id,
+      agent_group_id: AUTOWIRE_AGENT,
+      engage_mode: 'pattern',
+      engage_pattern: '.',
+      sender_scope: 'known',
+      ignored_message_policy: 'drop',
+      session_mode: 'shared',
+      priority: 0,
+      created_at: new Date().toISOString(),
+    });
+    const senderUserId = extractAndUpsertUser(event);
+    if (senderUserId) {
+      addMember({
+        user_id: senderUserId,
+        agent_group_id: AUTOWIRE_AGENT,
+        added_by: senderUserId,
+        added_at: new Date().toISOString(),
+      });
+    }
+    log.info('Auto-wired new channel in configured guild', {
+      messagingGroupId: mg.id,
+      agentGroupId: AUTOWIRE_AGENT,
+      mgaId,
+    });
+    await routeInbound(event);
+    return;
+  }
+
+  // 2. Only the owner's own new chats get a registration card; drop the rest.
+  const senderUserId = extractAndUpsertUser(event);
+  if (!senderUserId || !isOwner(senderUserId)) {
+    log.info('Unknown channel from non-owner sender — dropped, no card', {
+      messagingGroupId: mg.id,
+      channelType: mg.channel_type,
+      platformId: mg.platform_id,
+      senderUserId,
+    });
+    return;
+  }
   await requestChannelApproval({ messagingGroupId: mg.id, event });
 });
 
