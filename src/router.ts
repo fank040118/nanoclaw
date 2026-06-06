@@ -28,6 +28,7 @@ import {
 } from './db/messaging-groups.js';
 import { findSessionForAgent } from './db/sessions.js';
 import { startTypingRefresh, stopTypingRefresh } from './modules/typing/index.js';
+import { ackInbound } from './modules/reactions/index.js';
 import { log } from './log.js';
 import { resolveSession, writeSessionMessage, writeOutboundDirect } from './session-manager.js';
 import { wakeContainer } from './container-runner.js';
@@ -468,6 +469,13 @@ async function deliverToAgent(
     created,
     agentGroupName: agentGroup.name,
   });
+
+  // Acknowledge receipt with a reaction on the user's own message (origin
+  // channel, not deliveryAddr which may be a CLI reply-to override). Cleared
+  // when the agent's reply is delivered. Best-effort — see modules/reactions.
+  if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
+    ackInbound(session.id, event.channelType, event.platformId, event.threadId, event.message.id);
+  }
 
   if (wake) {
     // Typing indicator + wake are only for the engaged branch; accumulated

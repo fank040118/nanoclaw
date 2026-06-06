@@ -24,6 +24,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
+import { clearAcks } from './modules/reactions/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
@@ -368,6 +369,10 @@ async function deliverMessage(
     platformMsgId,
     fileCount: files?.length,
   });
+
+  // The agent's reply has landed in the channel — drop the 👀 receipt
+  // reaction(s) we put on the user's message(s) for this session.
+  clearAcks(session.id);
 
   clearOutbox(session.agent_group_id, session.id, msg.id);
 

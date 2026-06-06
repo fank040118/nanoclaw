@@ -138,6 +138,16 @@ export interface ChannelAdapter {
   resolveChannelName?(platformId: string): Promise<string | null>;
 
   /**
+   * Add / remove an emoji reaction on a specific platform message. Used by the
+   * receipt-reaction module to acknowledge an inbound message ("seen") and to
+   * clear that acknowledgement when the reply is delivered. Optional: platforms
+   * (or adapters) without reaction support simply omit these and the caller
+   * skips the operation.
+   */
+  addReaction?(platformId: string, threadId: string | null, messageId: string, emoji: string): Promise<void>;
+  removeReaction?(platformId: string, threadId: string | null, messageId: string, emoji: string): Promise<void>;
+
+  /**
    * Subscribe the bot to a thread so follow-up messages route via the
    * platform's "subscribed message" path (onSubscribedMessage in Chat SDK).
    * Called by the router when a mention-sticky wiring first engages in a
