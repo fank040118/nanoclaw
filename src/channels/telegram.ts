@@ -61,9 +61,11 @@ async function fetchBotUsername(token: string): Promise<string | null> {
 }
 
 function isGroupPlatformId(platformId: string): boolean {
-  // platformId is "telegram:<chatId>". Negative chat IDs are groups/channels.
-  const id = platformId.split(':').pop() ?? '';
-  return id.startsWith('-');
+  // platformId is "telegram:<chatId>" or "telegram:<chatId>:<topicId>" (per-topic
+  // groups). The chat id (negative for groups/channels) is the first segment after
+  // the "telegram:" prefix — NOT the last, which would be the topic id.
+  const chatId = platformId.split(':')[1] ?? '';
+  return chatId.startsWith('-');
 }
 
 interface InboundFields {
@@ -204,6 +206,18 @@ registerChannelAdapter('telegram', {
       botToken: token,
       mode: 'polling',
     });
+    // Per-topic messaging groups (Carbon's customization, 2026-06-06).
+    // The SDK encodes a forum topic's thread id as "telegram:<chatId>:<topicId>",
+    // but its channelIdFromThreadId() collapses that to chat-level "telegram:<chatId>",
+    // so every topic in a supergroup shares ONE messaging_group → one agent group.
+    // Returning the thread id unchanged makes each forum topic its OWN
+    // messaging_group, exactly like a Discord channel: a brand-new topic, once the
+    // bot is @mentioned in it, raises a channel-approval card so the owner can route
+    // that topic to any agent group (code/mc/img). DMs and non-forum groups carry no
+    // topic id (thread id is already "telegram:<chatId>"), so their behavior is
+    // unchanged. ⚠️ Re-running /add-telegram overwrites this file — reapply this line
+    // and the chat-id parsing fixes in isGroupPlatformId/resolveChannelName.
+    telegramAdapter.channelIdFromThreadId = (threadId: string) => threadId;
     const bridge = createChatSdkBridge({
       adapter: telegramAdapter,
       concurrency: 'concurrent',
@@ -223,7 +237,9 @@ registerChannelAdapter('telegram', {
     const wrapped: ChannelAdapter = {
       ...bridge,
       resolveChannelName: async (platformId: string) => {
-        const chatId = platformId.split(':').slice(1).join(':');
+        // platformId may be "telegram:<chatId>" or "telegram:<chatId>:<topicId>"
+        // (per-topic groups); getChat needs only the chat id (first segment).
+        const chatId = platformId.split(':')[1];
         if (!chatId) return null;
         try {
           const res = await fetch(`https://api.telegram.org/bot${token}/getChat`, {
