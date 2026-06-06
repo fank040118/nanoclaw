@@ -395,17 +395,21 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         const options: NormalizedOption[] = normalizeOptions(content.options as never);
         const card = Card({
           title,
+          // One Actions row per button so each button gets the full message
+          // width. Telegram divides a row's width evenly among its buttons and
+          // truncates long labels (it has no button-text scrolling), so several
+          // buttons in one row collapse to an unreadable prefix (e.g. every
+          // "nanoclaw-*" group showing just "nanoclaw"). Stacking one-per-row
+          // sidesteps that; other adapters (Discord) just render them vertically.
           children: [
             CardText(question),
-            Actions(
-              // Encode button id/value with the option index rather than the
-              // full value. Telegram caps callback_data at 64 bytes, and
-              // long values (e.g. ISO datetimes, URLs) push the JSON payload
-              // well past that. The onAction handlers resolve the index back
-              // to the real value via getAskQuestionRender(questionId).
-              options.map((opt, idx) =>
-                Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx) }),
-              ),
+            // Encode button id/value with the option index rather than the
+            // full value. Telegram caps callback_data at 64 bytes, and
+            // long values (e.g. ISO datetimes, URLs) push the JSON payload
+            // well past that. The onAction handlers resolve the index back
+            // to the real value via getAskQuestionRender(questionId).
+            ...options.map((opt, idx) =>
+              Actions([Button({ id: `ncq:${questionId}:${idx}`, label: opt.label, value: String(idx) })]),
             ),
           ],
         });
