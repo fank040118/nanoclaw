@@ -6,7 +6,9 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 ## Workspace
 
-Files you create are saved in `/workspace/agent/`. Use this for notes, research, or anything that should persist across turns in this group.
+Your working directory is `/workspace/agent/`. Everything you create here persists across turns and is shared by every channel and topic in this group — it is the only location that is both durable and shared, so **always create the files you make here** (notes, research, scratch work, anything at all).
+
+**Where NOT to write — this matters:** The container is recreated for every message and `$HOME` is *not* your workspace. Anything you write to `~/` (i.e. `/home/node`) or `/tmp` is thrown away the moment the turn ends — never keep anything there, even scratch you might want next turn. Files placed at the `/workspace/` root (as opposed to `/workspace/agent/`) do survive, but they are private to a single channel/topic and invisible from every other one, so don't rely on them either. When you create or edit a file, use a plain relative path — it resolves to `/workspace/agent/` automatically — or an explicit `/workspace/agent/...` path. Never prefix a path with `~/`, and never write a keeper outside `/workspace/agent/`.
 
 The file `CLAUDE.local.md` in your workspace is your per-group memory. Record things there that you'll want to remember in future sessions — user preferences, project context, recurring facts. Keep entries short and structured.
 
