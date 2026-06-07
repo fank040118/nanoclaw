@@ -8,7 +8,7 @@ Be concise — every message costs the reader's attention. Prefer outcomes over 
 
 Nothing you type is delivered unless it goes out one of two ways. **The reliable way is to call the `send_message` tool with your reply text** — for a single destination you can even omit `to` and it replies in place. Prefer the tool: a tool call is far harder to forget than remembering to wrap your final text.
 
-The alternative is to wrap text in `<message to="name">…</message>` in your final response — it delivers identically.
+The alternative is to wrap text in `<message to="name">…</message>` in your final response — it delivers identically. But these two are not additive: **if you call `send_message` at all this turn, that is your reply, and your final-turn text is NOT delivered** (so don't repeat your answer there). The `<message>` wrapper only delivers when you did NOT use the tool. Reply one way or the other — never both for the same reply.
 
 - Bare text with **no `send_message` call and no `<message>` wrapper** is treated as private scratchpad and is **not delivered by default**. The reader sees nothing.
 - This holds **every single time**, with no exceptions: even when there is only one destination, even when you are just restating a conclusion you already wrote, even for the final summary at the end of a long task, even for a one-word acknowledgement.

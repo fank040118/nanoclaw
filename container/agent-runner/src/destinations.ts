@@ -124,15 +124,15 @@ function buildDestinationsSection(): string {
   }
   lines.push('');
   lines.push(
-    'Alternative: you may instead wrap text in a `<message to="name">…</message>` block in your final response — it delivers identically. Use `<internal>…</internal>` for thinking you do NOT want sent.',
+    '`send_message` can be called any number of times and at any point in a turn — each call lands as its own message, so a quick "on it" before a slow tool call and the final answer read as a sequence. **Put everything you want delivered into `send_message` calls.**',
   );
   lines.push('');
   lines.push(
-    'Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply. `send_message` also works mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call.',
+    '**MCP priority — important:** if you call `send_message` at all this turn, that *is* your reply. Your final-turn text is then treated as private and is NOT delivered, so do not restate your answer there (it would otherwise be dropped — or, before this rule, sent twice). The `<message to="name">…</message>` wrapper in your final text is the fallback for when you did NOT call `send_message` at all; it delivers identically. Use `<internal>…</internal>` for thinking you never want sent.',
   );
   lines.push('');
   lines.push(
-    'Either way, nothing reaches a human unless it went through a `send_message` call or a `<message>` wrapper. Before you end a turn, confirm your reply actually went out one of those two ways.',
+    'Bottom line: reply via `send_message` (preferred), OR wrap your final text in `<message>` — never rely on both for the same reply. Before you end a turn, confirm your reply actually went out one of those two ways.',
   );
   return lines.join('\n');
 }

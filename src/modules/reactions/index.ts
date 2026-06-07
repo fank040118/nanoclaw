@@ -62,7 +62,12 @@ function emojiFor(channelType: string, stage: Stage): string {
   return (EMOJI_BY_PLATFORM[channelType] ?? DEFAULT_EMOJI)[stage];
 }
 
-const STAGE_RANK: Record<Stage, number> = { received: 0, working: 1, done: 2 };
+/** How long a turn must keep running before we show the 🔧 "working" stage.
+ *  Turns that finish within this window skip 🔧 and go 👀→✅ directly — most
+ *  turns are short, so this avoids 2 reaction API calls per message (Discord
+ *  rate-limits reactions hard). 🔧 then only appears on genuinely long turns,
+ *  which is exactly when "is it still alive or stuck?" matters. */
+const WORKING_REACTION_DELAY_MS = 4000;
 
 /** Safety cap on tracked reactions per session, so the map can't grow unbounded
  *  if a session keeps receiving messages that never reach 'done'. Oldest drop. */
@@ -74,6 +79,7 @@ interface TrackedReaction {
   threadId: string | null;
   messageId: string; // platform message id — what we react on
   stage: Stage;
+  processingSince?: number; // host ms when we first saw this turn 'processing'
 }
 
 /** session_id → tracked reactions, keyed by agent-side message id
@@ -118,24 +124,35 @@ export function ackInbound(
 
 /**
  * Advance reactions for a session from the current processing_ack rows. Called
- * each delivery poll tick (~1s for running sessions). Swaps 👀→🔧 when a message
- * starts processing and 🔧→✅ when it completes; drops the tracking record once
- * ✅ lands (the reaction itself persists on the platform). Best-effort.
+ * each delivery poll tick (~1s for running sessions).
+ *
+ * The 🔧 "working" stage is debounced: we only show it once a turn has been
+ * processing for WORKING_REACTION_DELAY_MS. A turn that completes before then
+ * goes 👀→✅ directly, skipping 🔧 — this keeps the common (short) turn at one
+ * reaction swap instead of two, which matters because Discord rate-limits
+ * reactions hard. 🔧 therefore only shows on long turns, which is exactly when
+ * "still alive or stuck?" is worth signalling. ✅ persists; we drop the
+ * tracking record once it lands.
  */
 export function syncSessionReactions(sessionId: string, ackRows: Array<{ message_id: string; status: string }>): void {
   const perSession = tracked.get(sessionId);
   if (!perSession || perSession.size === 0) return;
+  const now = Date.now();
 
   for (const row of ackRows) {
     const rec = perSession.get(row.message_id);
     if (!rec) continue;
-    const target: Stage | null =
-      row.status === 'processing' ? 'working' : row.status === 'completed' || row.status === 'failed' ? 'done' : null;
-    if (!target) continue;
-    if (STAGE_RANK[target] <= STAGE_RANK[rec.stage]) continue; // never move backwards
 
-    swapReaction(rec, target);
-    if (target === 'done') perSession.delete(row.message_id);
+    if (row.status === 'processing') {
+      if (rec.stage !== 'received') continue; // already 'working' or 'done'
+      if (rec.processingSince === undefined) rec.processingSince = now;
+      // Defer 🔧 until the turn has run long enough to count as "long".
+      if (now - rec.processingSince >= WORKING_REACTION_DELAY_MS) swapReaction(rec, 'working');
+    } else if (row.status === 'completed' || row.status === 'failed') {
+      if (rec.stage === 'done') continue;
+      swapReaction(rec, 'done'); // from 'received' (skips 🔧) or 'working'
+      perSession.delete(row.message_id);
+    }
   }
   if (perSession.size === 0) tracked.delete(sessionId);
 }

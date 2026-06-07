@@ -448,35 +448,40 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
-          // Did THIS turn already deliver anything (e.g. via send_message MCP)
-          // before the final result? Measure before dispatchResultText, which
-          // itself writes for any <message> blocks it finds.
+          // Did THIS turn already deliver anything via the send_message MCP tool
+          // before the final result? If so, the tool is authoritative ("MCP
+          // priority"): the final output is private sign-off and is NOT
+          // dispatched — otherwise the same reply lands twice, once via the tool
+          // and once via the final <message>/fallback path.
           const deliveredThisTurn = getOutboundChatWriteCount() - turnDeliveryBaseline;
-          const { hasUnwrapped } = dispatchResultText(event.text, routing);
-          // Only act when the turn ended with NOTHING delivered: no <message>
-          // block in the final text AND no mid-turn MCP send. Otherwise the
-          // bare text is scratchpad alongside a real reply — leave it dropped.
-          if (hasUnwrapped && deliveredThisTurn === 0) {
-            if (!unwrappedNudged) {
-              // First miss: give the model one chance to re-wrap correctly.
-              // A compliant model re-sends with <message> (sent>0, no repeat);
-              // a stubborn one stays bare and hits the fallback below.
-              unwrappedNudged = true;
-              const names = getAllDestinations()
-                .map((d) => d.name)
-                .join(', ');
-              query.push(
-                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                  `Your destinations: ${names}. ` +
-                  `Please re-send your response with the correct wrapping.</system>`,
-              );
-              turnDeliveryBaseline = getOutboundChatWriteCount();
-            } else {
-              // Already nudged once and STILL unwrapped — stop relying on the
-              // model. Deliver the bare text to its source channel so the reply
-              // is never silently swallowed. <internal> stays the escape hatch.
-              deliverUnwrappedFallback(event.text, routing);
+          if (deliveredThisTurn > 0) {
+            log(`Final output not dispatched — ${deliveredThisTurn} message(s) already sent via send_message this turn`);
+          } else {
+            const { hasUnwrapped } = dispatchResultText(event.text, routing);
+            // Nothing was delivered this turn (no send_message, and the final
+            // text had no <message> block). Recover the reply rather than drop it.
+            if (hasUnwrapped) {
+              if (!unwrappedNudged) {
+                // First miss: give the model one chance to re-wrap correctly.
+                // A compliant model re-sends with <message> (sent>0, no repeat);
+                // a stubborn one stays bare and hits the fallback below.
+                unwrappedNudged = true;
+                const names = getAllDestinations()
+                  .map((d) => d.name)
+                  .join(', ');
+                query.push(
+                  `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                    `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                    `Your destinations: ${names}. ` +
+                    `Please re-send your response with the correct wrapping.</system>`,
+                );
+                turnDeliveryBaseline = getOutboundChatWriteCount();
+              } else {
+                // Already nudged once and STILL unwrapped — stop relying on the
+                // model. Deliver the bare text to its source channel so the reply
+                // is never silently swallowed. <internal> stays the escape hatch.
+                deliverUnwrappedFallback(event.text, routing);
+              }
             }
           }
         }
