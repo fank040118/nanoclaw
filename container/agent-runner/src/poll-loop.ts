@@ -1,6 +1,6 @@
-import { findByName, getAllDestinations, type DestinationEntry } from './destinations.js';
+import { findByName, findByRouting, getAllDestinations, type DestinationEntry } from './destinations.js';
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
-import { writeMessageOut } from './db/messages-out.js';
+import { writeMessageOut, getOutboundChatWriteCount } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
@@ -303,6 +303,12 @@ async function processQuery(
   let queryContinuation: string | undefined;
   let done = false;
   let unwrappedNudged = false;
+  // Snapshot of the outbound chat-write counter at the start of the current
+  // turn (initial query or each follow-up/nudge push). Lets the result handler
+  // tell whether THIS turn already delivered anything (a <message> block or a
+  // send_message MCP call) before treating an unwrapped final result as a
+  // missed delivery.
+  let turnDeliveryBaseline = getOutboundChatWriteCount();
 
   // Concurrent polling: push follow-ups into the active query as they arrive.
   // We do NOT force-end the stream on silence — keeping the query open avoids
@@ -379,6 +385,7 @@ async function processQuery(
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
         query.push(prompt);
+        turnDeliveryBaseline = getOutboundChatWriteCount();
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node
@@ -441,17 +448,36 @@ async function processQuery(
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
         if (event.text) {
+          // Did THIS turn already deliver anything (e.g. via send_message MCP)
+          // before the final result? Measure before dispatchResultText, which
+          // itself writes for any <message> blocks it finds.
+          const deliveredThisTurn = getOutboundChatWriteCount() - turnDeliveryBaseline;
           const { hasUnwrapped } = dispatchResultText(event.text, routing);
-          if (hasUnwrapped && !unwrappedNudged) {
-            unwrappedNudged = true;
-            const destinations = getAllDestinations();
-            const names = destinations.map((d) => d.name).join(', ');
-            query.push(
-              `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
-                `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
-                `Your destinations: ${names}. ` +
-                `Please re-send your response with the correct wrapping.</system>`,
-            );
+          // Only act when the turn ended with NOTHING delivered: no <message>
+          // block in the final text AND no mid-turn MCP send. Otherwise the
+          // bare text is scratchpad alongside a real reply — leave it dropped.
+          if (hasUnwrapped && deliveredThisTurn === 0) {
+            if (!unwrappedNudged) {
+              // First miss: give the model one chance to re-wrap correctly.
+              // A compliant model re-sends with <message> (sent>0, no repeat);
+              // a stubborn one stays bare and hits the fallback below.
+              unwrappedNudged = true;
+              const names = getAllDestinations()
+                .map((d) => d.name)
+                .join(', ');
+              query.push(
+                `<system>Your response was not delivered — it was not wrapped in <message to="name">...</message> blocks. ` +
+                  `All output must be wrapped: use <message to="name"> for content to send, or <internal> for scratchpad. ` +
+                  `Your destinations: ${names}. ` +
+                  `Please re-send your response with the correct wrapping.</system>`,
+              );
+              turnDeliveryBaseline = getOutboundChatWriteCount();
+            } else {
+              // Already nudged once and STILL unwrapped — stop relying on the
+              // model. Deliver the bare text to its source channel so the reply
+              // is never silently swallowed. <internal> stays the escape hatch.
+              deliverUnwrappedFallback(event.text, routing);
+            }
           }
         }
       }
@@ -531,6 +557,35 @@ function dispatchResultText(text: string, routing: RoutingContext): { sent: numb
     log(`WARNING: agent output had no <message to="..."> blocks — nothing was sent`);
   }
   return { sent, hasUnwrapped };
+}
+
+/**
+ * Last-resort delivery for an unwrapped final result. Reached only when the
+ * agent finished a turn with bare text (no <message> block, no mid-turn MCP
+ * send) AND was already nudged once to re-wrap but stayed bare. Rather than
+ * silently drop what it clearly meant to say, strip <internal> scratchpad and
+ * deliver the rest to the channel the inbound message came from. If the source
+ * can't be resolved, fall back to the sole destination when there's exactly
+ * one; otherwise drop (and log) rather than guess among several.
+ */
+function deliverUnwrappedFallback(text: string, routing: RoutingContext): void {
+  const body = stripInternalTags(text).trim();
+  if (!body) return;
+
+  let dest = findByRouting(routing.channelType, routing.platformId);
+  if (!dest) {
+    const all = getAllDestinations();
+    if (all.length === 1) dest = all[0];
+  }
+  if (!dest) {
+    log(
+      `Unwrapped fallback: no resolvable destination (channel=${routing.channelType}, platform=${routing.platformId}) — dropping`,
+    );
+    return;
+  }
+
+  log(`Unwrapped fallback: agent stayed unwrapped after nudge — delivering bare output to "${dest.name}"`);
+  sendToDestination(dest, body, routing);
 }
 
 function sendToDestination(dest: DestinationEntry, body: string, routing: RoutingContext): void {

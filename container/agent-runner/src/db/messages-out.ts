@@ -6,6 +6,18 @@
  */
 import { getInboundDb, getOutboundDb } from './connection.js';
 
+// Process-wide counter of actual chat replies written to the outbound DB.
+// Used by the poll loop to tell, per turn, whether the agent has already
+// delivered *something* to the user (via a <message> block OR the
+// send_message MCP tool) before deciding whether an unwrapped final result
+// should be nudged / fallback-delivered. Both paths funnel through
+// writeMessageOut, so this single counter covers them all.
+let outboundChatWriteCount = 0;
+
+export function getOutboundChatWriteCount(): number {
+  return outboundChatWriteCount;
+}
+
 export interface MessageOutRow {
   id: string;
   seq: number | null;
@@ -72,6 +84,8 @@ export function writeMessageOut(msg: WriteMessageOut): number {
       $thread_id: msg.thread_id ?? null,
       $content: msg.content,
     });
+
+  if (msg.kind === 'chat') outboundChatWriteCount++;
 
   return nextSeq;
 }
