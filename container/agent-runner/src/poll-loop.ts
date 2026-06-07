@@ -2,7 +2,7 @@ import { findByName, findByRouting, getAllDestinations, type DestinationEntry } 
 import { getPendingMessages, markProcessing, markCompleted, type MessageInRow } from './db/messages-in.js';
 import { writeMessageOut, getOutboundChatWriteCount } from './db/messages-out.js';
 import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/connection.js';
-import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
+import { bumpTurnsCompleted, clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
   formatMessages,
@@ -447,6 +447,10 @@ async function processQuery(
         // (send_message) mid-turn, or the message may not need a response
         // at all — either way the turn is finished.
         markCompleted(initialBatchIds);
+        // Signal the host that a turn truly finished (reply or not) so it can
+        // advance the receipt reaction to ✅. Reliable even when the reply went
+        // out mid-turn via MCP or when the turn produced no reply at all.
+        bumpTurnsCompleted();
         if (event.text) {
           // Did THIS turn already deliver anything via the send_message MCP tool
           // before the final result? If so, the tool is authoritative ("MCP

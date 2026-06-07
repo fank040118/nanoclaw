@@ -5,21 +5,29 @@
  * so a long turn is legible at a glance:
  *
  *   👀 received — the host routed the message (set in the router).
- *   🔧 working  — no reply yet after WORKING_REACTION_DELAY_MS, i.e. the turn is
- *                 taking a while (a long task — or stuck).
- *   ✅ done     — a reply was actually delivered to the channel for this session.
+ *   🔧 working  — no completion yet after WORKING_REACTION_DELAY_MS, i.e. the
+ *                 turn is taking a while (a long task — or stuck).
+ *   ✅ done     — the agent's turn finished, whether or not it produced a reply.
  *
- * Signals are deliberately host-side and reliable: routing (👀), a timer (🔧),
- * and real outbound delivery (✅). An earlier version drove these off the
- * container's `processing_ack` table, but that is batch-oriented — a follow-up
- * message pushed into an already-open agent query is marked completed the
- * instant it is pushed (poll-loop `markCompleted` right after `query.push`),
- * not when its work finishes — so a 20s task flipped to ✅ within a second.
- * Actual delivery is the only signal that reliably means "the agent answered".
+ * ✅ is driven by a turn-completion counter the container bumps on every
+ * `result` event (session_state `turns_completed`), NOT by reply delivery. So a
+ * turn that completes WITHOUT replying still reaches ✅ — making "✅ but no reply
+ * in the channel" mean "the reply failed/was dropped", while "🔧 that never
+ * becomes ✅" means "crashed mid-turn before finishing". Reply delivery is also
+ * wired as a ✅ trigger (immediate when the reply lands); whichever fires first
+ * wins.
  *
- * Stages swap in place (one reaction at a time). A turn that never delivers a
- * reply stays at 👀→🔧 and never reaches ✅ — which is exactly the "is it stuck
- * or crashed?" signal. ✅ persists; the tracking record is dropped once it lands.
+ * An earlier version used the container's `processing_ack` table, but that is
+ * batch-oriented — a follow-up message pushed into an open agent query is marked
+ * completed the instant it is pushed, not when its work finishes — so it flipped
+ * a 20s task to ✅ within a second. The `turns_completed` counter is bumped only
+ * at the real `result` event, so it is reliable for every turn.
+ *
+ * Stages swap in place (one reaction at a time). ✅ persists; the tracking
+ * record is dropped once it lands. Each tracked message captures its own
+ * turns-completed baseline on first observation (not at receipt — the host's
+ * in-memory state is empty after a restart), so it only reaches ✅ on a turn
+ * that completes AFTER it arrived.
  *
  * Platform emoji sets differ: Telegram bots may only react with a fixed allowed
  * set (👀 is in it, 🔧/✅ are not), so Telegram uses ✍️/👌 substitutes.
@@ -68,6 +76,7 @@ interface TrackedReaction {
   messageId: string; // platform message id — what we react on
   stage: Stage;
   receivedAt: number; // host ms when the message was routed
+  turnsBaseline?: number; // session turns_completed at first observation; ✅ when it grows
 }
 
 /** session_id → reactions we're tracking (in arrival order). */
@@ -150,6 +159,36 @@ export function markSessionReplied(sessionId: string): void {
   for (const rec of list) {
     if (rec.stage !== 'done') swapReaction(rec, 'done');
   }
+}
+
+/**
+ * Advance reactions to ✅ for messages whose turn has completed, based on the
+ * container's monotonic `turns_completed` counter. Called each delivery poll
+ * tick with the current counter value. Each tracked message captures its
+ * baseline on first observation; once the counter grows beyond that baseline a
+ * turn has finished since the message arrived, so it reaches ✅ — even if no
+ * reply was delivered. (Reply delivery, via markSessionReplied, also drives ✅;
+ * whichever fires first wins.)
+ */
+export function syncTurnCompletion(sessionId: string, turnsCompleted: number): void {
+  const list = tracked.get(sessionId);
+  if (!list || list.length === 0) return;
+  const remaining: TrackedReaction[] = [];
+  for (const rec of list) {
+    if (rec.turnsBaseline === undefined) {
+      // First time we see this message against the counter — record the baseline
+      // (the host's in-memory state is empty after a restart, so we can't trust
+      // anything captured at receipt). Don't mark done yet.
+      rec.turnsBaseline = turnsCompleted;
+      remaining.push(rec);
+    } else if (rec.stage !== 'done' && turnsCompleted > rec.turnsBaseline) {
+      swapReaction(rec, 'done');
+    } else {
+      remaining.push(rec);
+    }
+  }
+  if (remaining.length === 0) tracked.delete(sessionId);
+  else tracked.set(sessionId, remaining);
 }
 
 /** Swap a message's reaction from its current stage to `next`. Remove-then-add

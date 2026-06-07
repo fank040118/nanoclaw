@@ -66,6 +66,20 @@ export function migrateLegacyContinuation(providerName: string): string | undefi
   return legacy;
 }
 
+const TURNS_COMPLETED_KEY = 'turns_completed';
+
+/**
+ * Increment the per-session count of completed agent turns. Written on every
+ * provider `result` event — the true end of a turn, whether or not it produced
+ * a reply. The host reads this to advance a message's reaction to ✅ on turn
+ * completion (so a turn that finishes without replying still shows done, while
+ * a turn that crashes mid-flight never increments and stays at 🔧).
+ */
+export function bumpTurnsCompleted(): void {
+  const next = Number(getValue(TURNS_COMPLETED_KEY) ?? '0') + 1;
+  setValue(TURNS_COMPLETED_KEY, String(next));
+}
+
 export function getContinuation(providerName: string): string | undefined {
   return getValue(continuationKey(providerName));
 }

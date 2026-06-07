@@ -16,6 +16,7 @@ import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
+  getSessionStateNumber,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
@@ -24,7 +25,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import { advanceWorkingReactions, markSessionReplied } from './modules/reactions/index.js';
+import { advanceWorkingReactions, markSessionReplied, syncTurnCompletion } from './modules/reactions/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
@@ -176,11 +177,13 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   try {
-    // Advance 👀→🔧 for messages that have gone unanswered past the delay. Runs
-    // before the no-messages early-return below — a still-working turn has no
-    // outbound row yet. Best-effort. (✅ is driven by actual delivery, in
-    // deliverMessage.)
+    // Advance progress reactions before the no-messages early-return below — a
+    // still-working turn has no outbound row to piggyback on. ✅ on turn
+    // completion first (so a finished turn skips a wasted 🔧 swap), then 👀→🔧
+    // for anything still unanswered past the delay. Best-effort. (Reply delivery
+    // also drives ✅, in deliverMessage.)
     try {
+      syncTurnCompletion(session.id, getSessionStateNumber(outDb, 'turns_completed'));
       advanceWorkingReactions(session.id);
     } catch (err) {
       log.warn('progress reaction tick failed', { sessionId: session.id, err });

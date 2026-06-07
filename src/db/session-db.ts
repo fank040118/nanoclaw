@@ -189,6 +189,22 @@ export function getStuckProcessingIds(outDb: Database.Database): string[] {
   ).map((r) => r.message_id);
 }
 
+/** Read a numeric value from the container-owned session_state table in
+ *  outbound.db. Returns 0 if the key/table is absent or unparseable. Defensive:
+ *  older sessions may predate the session_state table. */
+export function getSessionStateNumber(outDb: Database.Database, key: string): number {
+  try {
+    const row = outDb.prepare('SELECT value FROM session_state WHERE key = ?').get(key) as
+      | { value: string }
+      | undefined;
+    if (!row) return 0;
+    const n = Number(row.value);
+    return Number.isFinite(n) ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
 export interface ProcessingClaim {
   message_id: string;
   status_changed: string;
