@@ -16,7 +16,6 @@ import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
-  getProcessingAckRows,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
@@ -25,7 +24,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import { syncSessionReactions } from './modules/reactions/index.js';
+import { advanceWorkingReactions, markSessionReplied } from './modules/reactions/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
@@ -177,13 +176,14 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   try {
-    // Advance progress reactions (👀→🔧→✅) from processing_ack before the
-    // no-messages early-return below — the 🔧 (working) and the "done with no
-    // reply" cases have no outbound row to piggyback on. Best-effort.
+    // Advance 👀→🔧 for messages that have gone unanswered past the delay. Runs
+    // before the no-messages early-return below — a still-working turn has no
+    // outbound row yet. Best-effort. (✅ is driven by actual delivery, in
+    // deliverMessage.)
     try {
-      syncSessionReactions(session.id, getProcessingAckRows(outDb));
+      advanceWorkingReactions(session.id);
     } catch (err) {
-      log.warn('progress reaction sync failed', { sessionId: session.id, err });
+      log.warn('progress reaction tick failed', { sessionId: session.id, err });
     }
 
     // Read all due messages from outbound.db (read-only)
@@ -379,6 +379,13 @@ async function deliverMessage(
     platformMsgId,
     fileCount: files?.length,
   });
+
+  // A real reply landed in the channel — advance this session's receipt
+  // reaction(s) to ✅. Only for user-facing chat, not system actions or
+  // agent-to-agent routing (which the user never sees).
+  if (msg.kind !== 'system' && msg.channel_type !== 'agent') {
+    markSessionReplied(session.id);
+  }
 
   clearOutbox(session.agent_group_id, session.id, msg.id);
 

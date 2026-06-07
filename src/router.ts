@@ -473,10 +473,10 @@ async function deliverToAgent(
 
   // Acknowledge receipt with a 👀 reaction on the user's own message (origin
   // channel, not deliveryAddr which may be a CLI reply-to override). The
-  // reaction then advances 👀→🔧→✅ as the container processes the turn, driven
-  // from the delivery poll. Best-effort — see modules/reactions.
+  // reaction then advances 👀→🔧 (if the turn runs long) and →✅ when a reply is
+  // delivered. Best-effort — see modules/reactions.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
-    ackInbound(session.id, event.channelType, event.platformId, event.threadId, event.message.id, agentMessageId);
+    ackInbound(session.id, event.channelType, event.platformId, event.threadId, event.message.id);
   }
 
   if (wake) {

@@ -1,42 +1,31 @@
 /**
  * Progress-reaction module (Carbon customization).
  *
- * A three-stage reaction on the user's own inbound message that mirrors the
- * message lifecycle, so a long, tool-heavy turn is legible at a glance:
+ * A reaction on the user's own inbound message that tracks the reply lifecycle,
+ * so a long turn is legible at a glance:
  *
- *   👀 received — the host routed the message to a session (set in the router,
- *                 even when the message doesn't engage the agent: "I saw it").
- *   🔧 working  — the container claimed the message and is running the agent
- *                 (processing_ack → 'processing').
- *   ✅ done     — the agent's turn finished (processing_ack → 'completed').
+ *   👀 received — the host routed the message (set in the router).
+ *   🔧 working  — no reply yet after WORKING_REACTION_DELAY_MS, i.e. the turn is
+ *                 taking a while (a long task — or stuck).
+ *   ✅ done     — a reply was actually delivered to the channel for this session.
  *
- * The stages swap in place (one reaction at a time). ✅ persists — and it is
- * driven by turn completion, *independently of reply delivery*. So a ✅ with no
- * reply in the channel means the turn finished but the answer never made it out
- * (a crash or delivery failure after completion), which is otherwise invisible.
+ * Signals are deliberately host-side and reliable: routing (👀), a timer (🔧),
+ * and real outbound delivery (✅). An earlier version drove these off the
+ * container's `processing_ack` table, but that is batch-oriented — a follow-up
+ * message pushed into an already-open agent query is marked completed the
+ * instant it is pushed (poll-loop `markCompleted` right after `query.push`),
+ * not when its work finishes — so a 20s task flipped to ✅ within a second.
+ * Actual delivery is the only signal that reliably means "the agent answered".
  *
- * Failure is intentionally NOT a distinct stage: the container never writes a
- * 'failed' status, and a genuine hang is caught by host-sweep's claim-stuck
- * kill. So "🔧 that never becomes ✅" *is* the failure signal.
+ * Stages swap in place (one reaction at a time). A turn that never delivers a
+ * reply stays at 👀→🔧 and never reaches ✅ — which is exactly the "is it stuck
+ * or crashed?" signal. ✅ persists; the tracking record is dropped once it lands.
  *
- * Platform emoji sets differ. Telegram bots may only react with a fixed set
- * (👀 is in it, 🔧/✅ are not), so Telegram uses ✍️/👌 substitutes. Discord
- * accepts arbitrary emoji.
+ * Platform emoji sets differ: Telegram bots may only react with a fixed allowed
+ * set (👀 is in it, 🔧/✅ are not), so Telegram uses ✍️/👌 substitutes.
  *
- * Design notes:
- *  - Host-side only. Reactions are a platform operation (the container can't
- *    touch the platform directly), driven from the delivery poll which already
- *    reads outbound.db — ~1s latency for running sessions.
- *  - Best-effort throughout: every add/remove is fire-and-forget and swallows
- *    its own errors. A reaction failure (missing permission, deleted message,
- *    platform without reaction support, disallowed emoji) must never affect
- *    message delivery.
- *  - Correlation: processing_ack is keyed by the agent-side message id
- *    (`<platformMsgId>:<agentGroupId>`); we store that next to the platform id
- *    so a status row can be matched back to the message to react on.
- *  - Tracking is in-memory per session and dropped once ✅ lands. A host
- *    restart can orphan a stray reaction (harmless, rare); we accept that over
- *    persisting a table.
+ * Best-effort throughout: every add/remove is fire-and-forget and swallows its
+ * own errors — a reaction failure must never affect message delivery.
  */
 import { getChannelAdapter } from '../../channels/channel-registry.js';
 import { log } from '../../log.js';
@@ -62,15 +51,14 @@ function emojiFor(channelType: string, stage: Stage): string {
   return (EMOJI_BY_PLATFORM[channelType] ?? DEFAULT_EMOJI)[stage];
 }
 
-/** How long a turn must keep running before we show the 🔧 "working" stage.
- *  Turns that finish within this window skip 🔧 and go 👀→✅ directly — most
- *  turns are short, so this avoids 2 reaction API calls per message (Discord
- *  rate-limits reactions hard). 🔧 then only appears on genuinely long turns,
- *  which is exactly when "is it still alive or stuck?" matters. */
+/** How long a turn may run with no reply before we show 🔧. Short turns deliver
+ *  before this and go 👀→✅, skipping 🔧 — which also keeps Discord reaction API
+ *  calls low (it rate-limits reactions hard). 🔧 then only shows on long turns,
+ *  exactly when "still alive or stuck?" is worth signalling. */
 const WORKING_REACTION_DELAY_MS = 4000;
 
-/** Safety cap on tracked reactions per session, so the map can't grow unbounded
- *  if a session keeps receiving messages that never reach 'done'. Oldest drop. */
+/** Safety cap on tracked reactions per session, so the list can't grow unbounded
+ *  if a session keeps receiving messages that never get a reply. Oldest drop. */
 const MAX_PENDING_PER_SESSION = 50;
 
 interface TrackedReaction {
@@ -79,18 +67,17 @@ interface TrackedReaction {
   threadId: string | null;
   messageId: string; // platform message id — what we react on
   stage: Stage;
-  processingSince?: number; // host ms when we first saw this turn 'processing'
+  receivedAt: number; // host ms when the message was routed
 }
 
-/** session_id → tracked reactions, keyed by agent-side message id
- *  (`<platformMsgId>:<agentGroupId>`, the processing_ack key). */
-const tracked = new Map<string, Map<string, TrackedReaction>>();
+/** session_id → reactions we're tracking (in arrival order). */
+const tracked = new Map<string, TrackedReaction[]>();
 
 /**
- * React to a freshly-routed inbound message to acknowledge receipt (👀) and
- * begin tracking it so later lifecycle stages (working/done) can swap the
- * reaction. Safe to call for every routed user message; a no-op if the channel
- * adapter has no reaction support or the message has no platform id.
+ * React 👀 to a freshly-routed inbound message and begin tracking it so the
+ * reaction can advance to 🔧 / ✅ later. Safe to call for every routed user
+ * message; a no-op if the adapter has no reaction support or the message has no
+ * platform id.
  */
 export function ackInbound(
   sessionId: string,
@@ -98,23 +85,15 @@ export function ackInbound(
   platformId: string,
   threadId: string | null,
   messageId: string | undefined,
-  agentMessageId: string,
 ): void {
   if (!messageId) return;
   const adapter = getChannelAdapter(channelType);
   if (!adapter?.addReaction) return; // platform/adapter has no reaction support
 
-  let perSession = tracked.get(sessionId);
-  if (!perSession) {
-    perSession = new Map();
-    tracked.set(sessionId, perSession);
-  }
-  perSession.set(agentMessageId, { channelType, platformId, threadId, messageId, stage: 'received' });
-  while (perSession.size > MAX_PENDING_PER_SESSION) {
-    const oldest = perSession.keys().next().value;
-    if (oldest === undefined) break;
-    perSession.delete(oldest);
-  }
+  const list = tracked.get(sessionId) ?? [];
+  list.push({ channelType, platformId, threadId, messageId, stage: 'received', receivedAt: Date.now() });
+  while (list.length > MAX_PENDING_PER_SESSION) list.shift();
+  tracked.set(sessionId, list);
 
   const emoji = emojiFor(channelType, 'received');
   void adapter.addReaction(platformId, threadId, messageId, emoji).catch((err) => {
@@ -123,38 +102,33 @@ export function ackInbound(
 }
 
 /**
- * Advance reactions for a session from the current processing_ack rows. Called
- * each delivery poll tick (~1s for running sessions).
- *
- * The 🔧 "working" stage is debounced: we only show it once a turn has been
- * processing for WORKING_REACTION_DELAY_MS. A turn that completes before then
- * goes 👀→✅ directly, skipping 🔧 — this keeps the common (short) turn at one
- * reaction swap instead of two, which matters because Discord rate-limits
- * reactions hard. 🔧 therefore only shows on long turns, which is exactly when
- * "still alive or stuck?" is worth signalling. ✅ persists; we drop the
- * tracking record once it lands.
+ * Advance any reaction still at 👀 'received' (no reply yet) past the delay to
+ * 🔧 'working'. Called each delivery poll tick (~1s for running sessions), so 🔧
+ * appears ~WORKING_REACTION_DELAY_MS after a still-unanswered message.
  */
-export function syncSessionReactions(sessionId: string, ackRows: Array<{ message_id: string; status: string }>): void {
-  const perSession = tracked.get(sessionId);
-  if (!perSession || perSession.size === 0) return;
+export function advanceWorkingReactions(sessionId: string): void {
+  const list = tracked.get(sessionId);
+  if (!list || list.length === 0) return;
   const now = Date.now();
-
-  for (const row of ackRows) {
-    const rec = perSession.get(row.message_id);
-    if (!rec) continue;
-
-    if (row.status === 'processing') {
-      if (rec.stage !== 'received') continue; // already 'working' or 'done'
-      if (rec.processingSince === undefined) rec.processingSince = now;
-      // Defer 🔧 until the turn has run long enough to count as "long".
-      if (now - rec.processingSince >= WORKING_REACTION_DELAY_MS) swapReaction(rec, 'working');
-    } else if (row.status === 'completed' || row.status === 'failed') {
-      if (rec.stage === 'done') continue;
-      swapReaction(rec, 'done'); // from 'received' (skips 🔧) or 'working'
-      perSession.delete(row.message_id);
+  for (const rec of list) {
+    if (rec.stage === 'received' && now - rec.receivedAt >= WORKING_REACTION_DELAY_MS) {
+      swapReaction(rec, 'working');
     }
   }
-  if (perSession.size === 0) tracked.delete(sessionId);
+}
+
+/**
+ * A reply was delivered to the channel for this session — swap every
+ * outstanding reaction to ✅ 'done' and drop tracking (✅ persists on the
+ * platform). Replaces the old "remove the 👀 on reply" behaviour.
+ */
+export function markSessionReplied(sessionId: string): void {
+  const list = tracked.get(sessionId);
+  if (!list || list.length === 0) return;
+  tracked.delete(sessionId);
+  for (const rec of list) {
+    if (rec.stage !== 'done') swapReaction(rec, 'done');
+  }
 }
 
 /** Swap a message's reaction from its current stage to `next`. Remove-then-add
