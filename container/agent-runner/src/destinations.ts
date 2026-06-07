@@ -107,24 +107,32 @@ function buildDestinationsSection(): string {
     const d = all[0];
     const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
     lines.push(`Your destination is \`${d.name}\`${label}.`);
+    lines.push('');
+    lines.push(
+      '**To reply, call the `send_message` tool with your text.** You can omit `to` — it goes to this destination automatically. Prefer the tool: a tool call is far harder to forget than remembering to wrap your final text.',
+    );
   } else {
     lines.push('You can send messages to the following destinations:', '');
     for (const d of all) {
       const label = d.displayName && d.displayName !== d.name ? ` (${d.displayName})` : '';
       lines.push(`- \`${d.name}\`${label}`);
     }
+    lines.push('');
+    lines.push(
+      '**To reply, call the `send_message` tool** with `to` set to the destination name and your text. Prefer the tool: a tool call is far harder to forget than remembering to wrap your final text. When replying to an incoming message, default to the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute); pick a different one when the request asks for it (e.g., "tell Laura that…").',
+    );
   }
   lines.push('');
   lines.push(
-    'Wrap each delivered message in a `<message to="name">…</message>` block; include several blocks in one response to address several destinations. `<internal>…</internal>` marks thinking you don\'t want sent.',
+    'Alternative: you may instead wrap text in a `<message to="name">…</message>` block in your final response — it delivers identically. Use `<internal>…</internal>` for thinking you do NOT want sent.',
   );
   lines.push('');
   lines.push(
-    'When replying to an incoming message, default to addressing the destination it came `from` (every inbound `<message>` tag carries a `from="name"` attribute). Pick a different destination when the request asks for it (e.g., "tell Laura that…").',
+    'Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply. `send_message` also works mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call.',
   );
   lines.push('');
   lines.push(
-    'The `send_message` MCP tool is the same delivery, available mid-turn — handy for a quick acknowledgment ("on it") before a slow tool call. Each `send_message` call and each final-response `<message>` block lands as its own message in the conversation, so they read as a sequence rather than as one combined reply.',
+    'Either way, nothing reaches a human unless it went through a `send_message` call or a `<message>` wrapper. Before you end a turn, confirm your reply actually went out one of those two ways.',
   );
   return lines.join('\n');
 }
