@@ -6,16 +6,27 @@
  */
 import { getInboundDb, getOutboundDb } from './connection.js';
 
-// Process-wide counter of actual chat replies written to the outbound DB.
-// Used by the poll loop to tell, per turn, whether the agent has already
-// delivered *something* to the user (via a <message> block OR the
-// send_message MCP tool) before deciding whether an unwrapped final result
-// should be nudged / fallback-delivered. Both paths funnel through
-// writeMessageOut, so this single counter covers them all.
-let outboundChatWriteCount = 0;
-
+/**
+ * Count of chat replies written to outbound.db so far. Used by the poll loop to
+ * tell, per turn, whether the agent already delivered *something* to the user
+ * (via a final-text `<message>` block OR the send_message MCP tool) before
+ * deciding whether an unwrapped final result should be suppressed / nudged /
+ * fallback-delivered.
+ *
+ * This MUST query the DB, not an in-process counter: the send_message MCP tool
+ * runs in a SEPARATE `bun` subprocess (see index.ts — the nanoclaw MCP server
+ * is spawned with `command: 'bun'`), so its writes never touch this process's
+ * memory. An in-memory counter read here would always be 0 for tool sends,
+ * making the poll loop think nothing was delivered — which then spuriously
+ * nudges the model to "re-send", producing a duplicate reply. Both processes
+ * write the same outbound.db, so a row count is the only cross-process-correct
+ * signal.
+ */
 export function getOutboundChatWriteCount(): number {
-  return outboundChatWriteCount;
+  const row = getOutboundDb().prepare("SELECT COUNT(*) AS n FROM messages_out WHERE kind = 'chat'").get() as {
+    n: number;
+  };
+  return row.n;
 }
 
 export interface MessageOutRow {
@@ -84,8 +95,6 @@ export function writeMessageOut(msg: WriteMessageOut): number {
       $thread_id: msg.thread_id ?? null,
       $content: msg.content,
     });
-
-  if (msg.kind === 'chat') outboundChatWriteCount++;
 
   return nextSeq;
 }
