@@ -64,7 +64,7 @@ const MAX_PENDING_PER_SESSION = 50;
 interface TrackedReaction {
   channelType: string;
   platformId: string;
-  threadId: string | null;
+  reactThreadId: string | null; // thread/channel to react IN (see resolveReactTarget)
   messageId: string; // platform message id — what we react on
   stage: Stage;
   receivedAt: number; // host ms when the message was routed
@@ -72,6 +72,26 @@ interface TrackedReaction {
 
 /** session_id → reactions we're tracking (in arrival order). */
 const tracked = new Map<string, TrackedReaction[]>();
+
+/**
+ * Decide which thread/channel to *react in* for a message.
+ *
+ * A reaction must target the channel the message physically lives in. On
+ * Discord, when a conversation runs in a thread, the thread id is the id of its
+ * root message — so the inbound threadId looks like `…:<channel>:<rootMsgId>`.
+ * The root message itself lives in the PARENT channel, not inside the thread,
+ * so reacting to it via the thread id 404s ("Unknown Message"). Messages posted
+ * *inside* the thread are found via the thread id as normal.
+ *
+ * So: if threadId ends with `:<messageId>`, this message is the thread root —
+ * react in the parent channel (platformId, which carries no thread suffix).
+ * Otherwise react in the thread (threadId). Returning null makes the adapter
+ * fall back to platformId.
+ */
+function resolveReactTarget(platformId: string, threadId: string | null, messageId: string): string | null {
+  if (threadId && threadId.endsWith(`:${messageId}`)) return null; // thread root → parent channel
+  return threadId;
+}
 
 /**
  * React 👀 to a freshly-routed inbound message and begin tracking it so the
@@ -90,13 +110,14 @@ export function ackInbound(
   const adapter = getChannelAdapter(channelType);
   if (!adapter?.addReaction) return; // platform/adapter has no reaction support
 
+  const reactThreadId = resolveReactTarget(platformId, threadId, messageId);
   const list = tracked.get(sessionId) ?? [];
-  list.push({ channelType, platformId, threadId, messageId, stage: 'received', receivedAt: Date.now() });
+  list.push({ channelType, platformId, reactThreadId, messageId, stage: 'received', receivedAt: Date.now() });
   while (list.length > MAX_PENDING_PER_SESSION) list.shift();
   tracked.set(sessionId, list);
 
   const emoji = emojiFor(channelType, 'received');
-  void adapter.addReaction(platformId, threadId, messageId, emoji).catch((err) => {
+  void withReactionRetry(() => adapter.addReaction!(platformId, reactThreadId, messageId, emoji)).catch((err) => {
     log.warn('progress reaction add failed', { stage: 'received', channelType, platformId, messageId, err });
   });
 }
@@ -143,12 +164,16 @@ function swapReaction(rec: TrackedReaction, next: Stage): void {
 
   void (async () => {
     try {
-      if (adapter?.removeReaction) await adapter.removeReaction(rec.platformId, rec.threadId, rec.messageId, oldEmoji);
+      if (adapter?.removeReaction)
+        await withReactionRetry(() =>
+          adapter.removeReaction!(rec.platformId, rec.reactThreadId, rec.messageId, oldEmoji),
+        );
     } catch (err) {
       log.warn('progress reaction remove failed', { stage: next, ...recMeta(rec), emoji: oldEmoji, err });
     }
     try {
-      if (adapter?.addReaction) await adapter.addReaction(rec.platformId, rec.threadId, rec.messageId, newEmoji);
+      if (adapter?.addReaction)
+        await withReactionRetry(() => adapter.addReaction!(rec.platformId, rec.reactThreadId, rec.messageId, newEmoji));
     } catch (err) {
       log.warn('progress reaction add failed', { stage: next, ...recMeta(rec), emoji: newEmoji, err });
     }
@@ -157,4 +182,26 @@ function swapReaction(rec: TrackedReaction, next: Stage): void {
 
 function recMeta(rec: TrackedReaction) {
   return { channelType: rec.channelType, platformId: rec.platformId, messageId: rec.messageId };
+}
+
+/**
+ * Run a reaction API call, retrying on Discord 429 rate limits (the reaction
+ * endpoints are throttled hard, and the 3-stage flow makes several calls in
+ * quick succession). Honors the `retry_after` from the error body; gives up
+ * after a few attempts so a persistent failure can't loop. Re-throws the last
+ * error so the caller's `.catch` can log it.
+ */
+async function withReactionRetry(fn: () => Promise<void>): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      await fn();
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!msg.includes('429') || attempt >= 2) throw err;
+      const m = msg.match(/retry_after"?\s*:\s*([\d.]+)/);
+      const waitMs = (m ? Math.ceil(parseFloat(m[1]) * 1000) : 400) + 150;
+      await new Promise((resolve) => setTimeout(resolve, waitMs));
+    }
+  }
 }
