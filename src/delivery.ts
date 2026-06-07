@@ -16,6 +16,7 @@ import { getMessagingGroupByPlatform } from './db/messaging-groups.js';
 import {
   getDueOutboundMessages,
   getDeliveredIds,
+  getProcessingAckRows,
   markDelivered,
   markDeliveryFailed,
   migrateDeliveredTable,
@@ -24,7 +25,7 @@ import { log } from './log.js';
 import { normalizeOptions } from './channels/ask-question.js';
 import { clearOutbox, openInboundDb, openOutboundDb, readOutboxFiles } from './session-manager.js';
 import { pauseTypingRefreshAfterDelivery, setTypingAdapter } from './modules/typing/index.js';
-import { clearAcks } from './modules/reactions/index.js';
+import { syncSessionReactions } from './modules/reactions/index.js';
 import type { OutboundFile } from './channels/adapter.js';
 import type { Session } from './types.js';
 
@@ -176,6 +177,15 @@ async function drainSession(session: Session): Promise<void> {
   }
 
   try {
+    // Advance progress reactions (👀→🔧→✅) from processing_ack before the
+    // no-messages early-return below — the 🔧 (working) and the "done with no
+    // reply" cases have no outbound row to piggyback on. Best-effort.
+    try {
+      syncSessionReactions(session.id, getProcessingAckRows(outDb));
+    } catch (err) {
+      log.warn('progress reaction sync failed', { sessionId: session.id, err });
+    }
+
     // Read all due messages from outbound.db (read-only)
     const allDue = getDueOutboundMessages(outDb);
     if (allDue.length === 0) return;
@@ -369,10 +379,6 @@ async function deliverMessage(
     platformMsgId,
     fileCount: files?.length,
   });
-
-  // The agent's reply has landed in the channel — drop the 👀 receipt
-  // reaction(s) we put on the user's message(s) for this session.
-  clearAcks(session.id);
 
   clearOutbox(session.agent_group_id, session.id, msg.id);
 

@@ -448,8 +448,9 @@ async function deliverToAgent(
     }
   }
 
+  const agentMessageId = messageIdForAgent(event.message.id, agent.agent_group_id);
   writeSessionMessage(session.agent_group_id, session.id, {
-    id: messageIdForAgent(event.message.id, agent.agent_group_id),
+    id: agentMessageId,
     kind: event.message.kind,
     timestamp: event.message.timestamp,
     platformId: deliveryAddr.platformId,
@@ -470,11 +471,12 @@ async function deliverToAgent(
     agentGroupName: agentGroup.name,
   });
 
-  // Acknowledge receipt with a reaction on the user's own message (origin
-  // channel, not deliveryAddr which may be a CLI reply-to override). Cleared
-  // when the agent's reply is delivered. Best-effort — see modules/reactions.
+  // Acknowledge receipt with a 👀 reaction on the user's own message (origin
+  // channel, not deliveryAddr which may be a CLI reply-to override). The
+  // reaction then advances 👀→🔧→✅ as the container processes the turn, driven
+  // from the delivery poll. Best-effort — see modules/reactions.
   if (event.message.kind === 'chat' || event.message.kind === 'chat-sdk') {
-    ackInbound(session.id, event.channelType, event.platformId, event.threadId, event.message.id);
+    ackInbound(session.id, event.channelType, event.platformId, event.threadId, event.message.id, agentMessageId);
   }
 
   if (wake) {

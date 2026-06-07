@@ -189,6 +189,15 @@ export function getStuckProcessingIds(outDb: Database.Database): string[] {
   ).map((r) => r.message_id);
 }
 
+/** All processing_ack rows with their current status. Used host-side to drive
+ *  the progress-reaction state machine (received → working → done). */
+export function getProcessingAckRows(outDb: Database.Database): Array<{ message_id: string; status: string }> {
+  return outDb.prepare('SELECT message_id, status FROM processing_ack').all() as Array<{
+    message_id: string;
+    status: string;
+  }>;
+}
+
 export interface ProcessingClaim {
   message_id: string;
   status_changed: string;
